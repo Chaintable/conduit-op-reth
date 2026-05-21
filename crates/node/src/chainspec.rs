@@ -40,15 +40,19 @@ pub struct StateOverrideFork0Config {
 
 /// Custom chain spec wrapping [`OpChainSpec`] with ConduitOp-specific fork configuration.
 ///
-/// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list so they
-/// participate in fork IDs, fork filters, and `forks_iter()`. The `state_override_fork0`
-/// field carries the associated state update data consumed by the block executor.
+/// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list by default so they
+/// participate in fork IDs, fork filters, and `forks_iter()`. The `state_override_fork0` field
+/// carries the associated state update data consumed by the block executor. The activation
+/// condition is tracked separately because some legacy networks are excluded from registering the
+/// custom fork for fork ID compatibility.
 #[derive(Debug, Clone)]
 pub struct ConduitOpChainSpec {
     /// Inner OP chain spec (handles all standard OP + Ethereum hardforks).
     pub inner: OpChainSpec,
     /// Configuration for StateOverrideFork0 (None if not configured).
     pub state_override_fork0: Option<StateOverrideFork0Config>,
+    /// Activation condition for StateOverrideFork0, tracked independently from fork IDs.
+    state_override_fork0_activation: ForkCondition,
 }
 
 impl EthChainSpec for ConduitOpChainSpec {
@@ -143,7 +147,9 @@ impl OpHardforks for ConduitOpChainSpec {
 
 impl ConduitOpHardforks for ConduitOpChainSpec {
     fn conduit_op_fork_activation(&self, fork: ConduitOpHardfork) -> ForkCondition {
-        self.fork(fork)
+        match fork {
+            ConduitOpHardfork::StateOverrideFork0 => self.state_override_fork0_activation,
+        }
     }
 }
 
@@ -167,6 +173,14 @@ struct StateOverrideFork0Raw {
 }
 
 const LEGACY_CANYON_GENESIS_CHAIN_IDS: &[u64] = &[1740, 53302, 888888888, 31929];
+
+// These legacy networks have existing peers that do not include StateOverrideFork0 in their
+// EIP-2124 fork ID.
+const STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS: &[u64] = &[901, 957];
+
+fn exclude_state_override_from_fork_id(op_chain_spec: &OpChainSpec) -> bool {
+    STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS.contains(&op_chain_spec.inner.genesis.config.chain_id)
+}
 
 fn use_legacy_genesis_header_for_known_chains(op_chain_spec: &mut OpChainSpec) -> bool {
     if !LEGACY_CANYON_GENESIS_CHAIN_IDS.contains(&op_chain_spec.inner.genesis.config.chain_id) {
@@ -206,6 +220,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             return Ok(Arc::new(ConduitOpChainSpec {
                 inner: (*op_chain_spec).clone(),
                 state_override_fork0: None,
+                state_override_fork0_activation: ForkCondition::Never,
             }));
         }
 
@@ -230,17 +245,35 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             );
         }
 
-        // Register custom hardfork in the inner hardfork list so it appears in
-        // fork IDs, fork filters, and forks_iter().
+        let state_override_fork0_activation = raw_fork0
+            .as_ref()
+            .map(|raw| ForkCondition::Timestamp(raw.time))
+            .unwrap_or(ForkCondition::Never);
+
         let state_override_fork0 = raw_fork0.map(|raw| {
-            op_chain_spec
-                .inner
-                .hardforks
-                .insert(ConduitOpHardfork::StateOverrideFork0, ForkCondition::Timestamp(raw.time));
-            StateOverrideFork0Config { updates: raw.updates }
+            let config = StateOverrideFork0Config { updates: raw.updates };
+
+            if exclude_state_override_from_fork_id(&op_chain_spec) {
+                eprintln!(
+                    "Excluding StateOverrideFork0 from fork ID calculation for chain ID {} at timestamp {}",
+                    op_chain_spec.inner.genesis.config.chain_id,
+                    raw.time
+                );
+            } else {
+                op_chain_spec.inner.hardforks.insert(
+                    ConduitOpHardfork::StateOverrideFork0,
+                    ForkCondition::Timestamp(raw.time),
+                );
+            }
+
+            config
         });
 
-        Ok(Arc::new(ConduitOpChainSpec { inner: op_chain_spec, state_override_fork0 }))
+        Ok(Arc::new(ConduitOpChainSpec {
+            inner: op_chain_spec,
+            state_override_fork0,
+            state_override_fork0_activation,
+        }))
     }
 }
 
@@ -304,6 +337,13 @@ mod tests {
                 }
             }
         });
+        serde_json::to_string(&genesis).unwrap()
+    }
+
+    fn with_conduit_fork_for_chain(chain_id: u64, time: u64) -> String {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_conduit_fork(time)).unwrap();
+        genesis["config"]["chainId"] = serde_json::json!(chain_id);
         serde_json::to_string(&genesis).unwrap()
     }
 
@@ -477,6 +517,36 @@ mod tests {
         // fork_filter.current() must agree with fork_id() at each stage.
         assert_eq!(spec.fork_filter(head_at(0)).current(), spec.fork_id(&head_at(0)));
         assert_eq!(spec.fork_filter(head_at(5000)).current(), spec.fork_id(&head_at(5000)));
+    }
+
+    #[test]
+    fn excluded_chain_ids_keep_custom_fork_out_of_fork_ids() {
+        for &chain_id in STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS {
+            let json = with_conduit_fork_for_chain(chain_id, 5000);
+            let spec = parse_spec(&json);
+            let op_spec: OpChainSpec = {
+                let mut genesis: serde_json::Value = serde_json::from_str(&json).unwrap();
+                genesis["config"].as_object_mut().unwrap().remove("conduit");
+                let genesis: Genesis = serde_json::from_value(genesis).unwrap();
+                genesis.into()
+            };
+
+            assert_eq!(
+                spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
+                ForkCondition::Timestamp(5000),
+            );
+            assert!(spec.is_state_override_fork0_active_at_timestamp(5000));
+
+            let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
+            assert!(
+                !names.contains(&"StateOverrideFork0"),
+                "forks_iter should not include custom fork for chain {chain_id}, got: {names:?}",
+            );
+
+            assert_eq!(spec.fork_id(&head_at(0)), op_spec.fork_id(&head_at(0)));
+            assert_eq!(spec.fork_id(&head_at(5000)), op_spec.fork_id(&head_at(5000)));
+            assert_eq!(spec.latest_fork_id(), op_spec.latest_fork_id());
+        }
     }
 
     /// Regression test: parse the saigon genesis fixture (used by e2e tests)
