@@ -55,7 +55,9 @@ alloy-sol-macro = "1.5.6"
 alloy-sol-types = "1.5.6"
 alloy-rpc-types-eth = "1.8.2"
 op-alloy-consensus = "0.23"
+op-alloy-rpc-types = "0.23"
 op-alloy-rpc-types-engine = "0.23"
+op-alloy-network = "0.23"
 
 # Revm
 revm = "34"
@@ -67,7 +69,10 @@ reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "
 reth-payload-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.4" }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.4" }
 reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.4" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+reth-rpc-convert = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.4" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["query"] }
+reth-optimism-flashblocks = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v1.11.5" }
 
 alloy-rpc-types-engine = "1.8.2"
 alloy-signer-local = "1.8.2"
@@ -92,85 +97,82 @@ op-alloy-network = { git = "https://github.com/ethereum-optimism/optimism", tag 
 alloy-op-evm = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v1.11.5" }
 alloy-op-hardforks = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v1.11.5" }
 
-# Redirect transitive paradigmxyz/reth v1.11.3 deps (pulled in by op-reth/v1.11.5)
-# to v1.11.4 so the workspace resolves a single set of reth-* crates.
-# Pin by `rev` (not `tag`) because cargo rejects same-source patches when both sides
-# use `tag`. The commit hash below is the v1.11.4 release tag.
+# Redirect paradigmxyz/reth crates (pulled in by op-reth/v1.11.5) to the
+# Chaintable/conduit-reth fork containing the get_deposit_nonce / get_l1_fee
+# trait defaults and debank trace RPC extensions.
 [patch."https://github.com/paradigmxyz/reth"]
-reth-basic-payload-builder = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-chain-state = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-chainspec = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-cli = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-cli-commands = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-cli-runner = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-cli-util = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-codecs = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-consensus = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-consensus-common = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-db = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-db-api = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-db-common = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-downloaders = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-e2e-test-utils = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-engine-local = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-engine-primitives = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-errors = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-eth-wire = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-eth-wire-types = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-ethereum-cli = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-ethereum-consensus = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-ethereum-forks = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-ethereum-primitives = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-evm = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-evm-ethereum = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-execution-errors = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-execution-types = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-exex = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-fs-util = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-metrics = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-network = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-network-api = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-network-peers = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-node-api = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-node-builder = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-node-core = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-node-ethereum = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-node-events = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-node-metrics = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-payload-builder = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-payload-builder-primitives = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-payload-primitives = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-payload-util = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-payload-validator = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-primitives = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-primitives-traits = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-provider = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-prune = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-prune-types = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-revm = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-rpc = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-rpc-api = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-rpc-builder = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-rpc-convert = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-rpc-engine-api = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-rpc-eth-api = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-rpc-eth-types = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-rpc-layer = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-rpc-server-types = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-stages = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-stages-types = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-static-file = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-static-file-types = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-storage-api = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-storage-errors = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-tasks = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-testing-utils = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-tracing = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-transaction-pool = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-trie = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-trie-common = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-trie-db = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
-reth-zstd-compressors = { git = "https://github.com/conduitxyz/reth", rev = "2ac58a25f561827e2b816a3c1ed972194f3b2915" }
+reth-basic-payload-builder = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-chain-state = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-chainspec = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-cli = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-cli-commands = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-cli-runner = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-cli-util = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-codecs = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-consensus = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-consensus-common = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-db = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-db-api = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-db-common = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-downloaders = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-engine-local = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-engine-primitives = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-errors = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-eth-wire = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-eth-wire-types = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-ethereum-cli = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-ethereum-consensus = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-ethereum-forks = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-ethereum-primitives = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-evm = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-evm-ethereum = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-execution-errors = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-execution-types = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-exex = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-fs-util = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-metrics = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-network = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-network-api = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-network-peers = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-node-api = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-node-builder = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-node-core = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-node-ethereum = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-node-events = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-node-metrics = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-payload-builder = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-payload-builder-primitives = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-payload-primitives = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-payload-util = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-payload-validator = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-primitives = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-primitives-traits = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-provider = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-prune = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-prune-types = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-revm = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-rpc = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-rpc-api = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-rpc-builder = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-rpc-convert = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-rpc-engine-api = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-rpc-eth-api = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-rpc-eth-types = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-rpc-layer = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-rpc-server-types = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-stages = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-stages-types = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-static-file = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-static-file-types = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-storage-api = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-storage-errors = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-tasks = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-tracing = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-transaction-pool = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-trie = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-trie-common = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-trie-db = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
+reth-zstd-compressors = { git = "https://github.com/Chaintable/conduit-reth.git", rev = "v1.0.2-debank-1" }
 
 [profile.maxperf]
 inherits = "release"
