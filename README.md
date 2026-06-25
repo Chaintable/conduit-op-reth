@@ -41,7 +41,7 @@ Fully compatible with existing OP Stack networks, serving as a drop-in replaceme
 ### Production Build
 
 ```bash
-git clone https://github.com/Chaintable/conduit-op-reth.git
+git clone https://github.com/Chaintable/conduit-op-reth
 cd conduit-op-reth
 cargo build --profile maxperf
 ```
