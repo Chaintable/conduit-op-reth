@@ -20,10 +20,10 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest-m
+            runner: ubuntu-latest
             arch: amd64
           - platform: linux/arm64
-            runner: ubuntu-latest-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -42,14 +42,6 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Generate app token
-        id: generate-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.RELEASE_MANAGER_APP_ID }}
-          private-key: ${{ secrets.RELEASE_MANAGER_APP_SECRET }}
-          owner: ${{ github.repository_owner }}
 
       - name: Set revision
         run: echo "REVISION=$(git rev-parse --short=8 HEAD)" >> $GITHUB_ENV
@@ -76,7 +68,6 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.REVISION }}-${{ matrix.arch }}
-          build-args: GITHUB_TOKEN=${{ steps.generate-token.outputs.token }}
           cache-from: type=gha,scope=build-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
           provenance: false
