@@ -32,8 +32,6 @@ ENV SCCACHE_DIR=/sccache
 
 FROM base AS planner
 WORKDIR /app
-ARG GITHUB_TOKEN=""
-RUN if [ -n "$GITHUB_TOKEN" ]; then git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com".insteadOf "https://github.com"; fi
 COPY . .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -43,8 +41,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM base AS builder
 WORKDIR /app
-ARG GITHUB_TOKEN=""
-RUN if [ -n "$GITHUB_TOKEN" ]; then git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com".insteadOf "https://github.com"; fi
 COPY --from=planner /app/recipe.json recipe.json
 ARG BUILD_PROFILE=maxperf
 
