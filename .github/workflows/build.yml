@@ -9,7 +9,8 @@ on:
 
 env:
   REGISTRY: public.ecr.aws/b2h7a5c4/chaintable
-  IMAGE_NAME: ronin-writer
+  IMAGE_NAME: conduit-op-reth
+  CHAINS: "ronin katana"
   DOCKERFILE: Dockerfile.debank
 
 jobs:
@@ -102,9 +103,15 @@ jobs:
         with:
           registry-type: public
 
-      - name: Create and push multi-arch manifest
+      - name: Create and push multi-arch manifest + per-chain writer aliases
         run: |
           docker buildx imagetools create \
             -t ${REGISTRY}/${IMAGE_NAME}:${REVISION} \
             ${REGISTRY}/${IMAGE_NAME}:${REVISION}-amd64 \
             ${REGISTRY}/${IMAGE_NAME}:${REVISION}-arm64
+          # per-chain writer aliases (same digest, multiple names)
+          for c in ${CHAINS}; do
+            docker buildx imagetools create \
+              -t ${REGISTRY}/${c}-writer:${REVISION} \
+              ${REGISTRY}/${IMAGE_NAME}:${REVISION}
+          done
