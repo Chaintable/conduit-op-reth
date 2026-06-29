@@ -7,8 +7,11 @@ use reth_chainspec::{
     ForkFilter, ForkId, Hardfork, Hardforks, Head,
 };
 use reth_cli::chainspec::{ChainSpecParser, parse_genesis};
-use reth_optimism_chainspec::{OpChainSpec, SUPPORTED_CHAINS, generated_chain_value_parser};
+use reth_optimism_chainspec::{
+    OpChainSpec, SUPPORTED_CHAINS, generated_chain_value_parser, make_op_genesis_header,
+};
 use reth_optimism_forks::{OpHardfork, OpHardforks};
+use reth_primitives_traits::SealedHeader;
 use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
@@ -37,15 +40,19 @@ pub struct StateOverrideFork0Config {
 
 /// Custom chain spec wrapping [`OpChainSpec`] with ConduitOp-specific fork configuration.
 ///
-/// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list so they
-/// participate in fork IDs, fork filters, and `forks_iter()`. The `state_override_fork0`
-/// field carries the associated state update data consumed by the block executor.
+/// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list by default so they
+/// participate in fork IDs, fork filters, and `forks_iter()`. The `state_override_fork0` field
+/// carries the associated state update data consumed by the block executor. The activation
+/// condition is tracked separately because some legacy networks are excluded from registering the
+/// custom fork for fork ID compatibility.
 #[derive(Debug, Clone)]
 pub struct ConduitOpChainSpec {
     /// Inner OP chain spec (handles all standard OP + Ethereum hardforks).
     pub inner: OpChainSpec,
     /// Configuration for StateOverrideFork0 (None if not configured).
     pub state_override_fork0: Option<StateOverrideFork0Config>,
+    /// Activation condition for StateOverrideFork0, tracked independently from fork IDs.
+    state_override_fork0_activation: ForkCondition,
 }
 
 impl EthChainSpec for ConduitOpChainSpec {
@@ -140,7 +147,9 @@ impl OpHardforks for ConduitOpChainSpec {
 
 impl ConduitOpHardforks for ConduitOpChainSpec {
     fn conduit_op_fork_activation(&self, fork: ConduitOpHardfork) -> ForkCondition {
-        self.fork(fork)
+        match fork {
+            ConduitOpHardfork::StateOverrideFork0 => self.state_override_fork0_activation,
+        }
     }
 }
 
@@ -163,6 +172,35 @@ struct StateOverrideFork0Raw {
     updates: HashMap<Address, StateOverrideAccount>,
 }
 
+const LEGACY_CANYON_GENESIS_CHAIN_IDS: &[u64] = &[1740, 53302, 888888888, 31929];
+
+// These legacy networks have existing peers that do not include StateOverrideFork0 in their
+// EIP-2124 fork ID.
+const STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS: &[u64] = &[901, 957];
+
+fn exclude_state_override_from_fork_id(op_chain_spec: &OpChainSpec) -> bool {
+    STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS.contains(&op_chain_spec.inner.genesis.config.chain_id)
+}
+
+fn use_legacy_genesis_header_for_known_chains(op_chain_spec: &mut OpChainSpec) -> bool {
+    if !LEGACY_CANYON_GENESIS_CHAIN_IDS.contains(&op_chain_spec.inner.genesis.config.chain_id) {
+        return false;
+    }
+
+    // These legacy networks have Canyon active at genesis, but their block 0 was built without
+    // Shanghai header fields. Keep the runtime hardfork list unchanged so Canyon still enables
+    // post-genesis Shanghai semantics, but reseal their genesis headers without withdrawals root.
+    let mut genesis_hardforks = op_chain_spec.inner.hardforks.clone();
+    genesis_hardforks.remove(&EthereumHardfork::Shanghai);
+
+    op_chain_spec.inner.genesis_header = SealedHeader::seal_slow(make_op_genesis_header(
+        &op_chain_spec.inner.genesis,
+        &genesis_hardforks,
+    ));
+
+    true
+}
+
 /// ConduitOp chain specification parser.
 ///
 /// Parses standard OP chain specs and additionally extracts the `"conduit"` section
@@ -182,6 +220,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             return Ok(Arc::new(ConduitOpChainSpec {
                 inner: (*op_chain_spec).clone(),
                 state_override_fork0: None,
+                state_override_fork0_activation: ForkCondition::Never,
             }));
         }
 
@@ -199,18 +238,42 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 
         // Convert genesis to OpChainSpec (handles all OP hardfork parsing).
         let mut op_chain_spec: OpChainSpec = genesis.into();
+        if use_legacy_genesis_header_for_known_chains(&mut op_chain_spec) {
+            eprintln!(
+                "Using legacy Canyon genesis header compatibility mode for chain ID {}",
+                op_chain_spec.inner.genesis.config.chain_id
+            );
+        }
 
-        // Register custom hardfork in the inner hardfork list so it appears in
-        // fork IDs, fork filters, and forks_iter().
+        let state_override_fork0_activation = raw_fork0
+            .as_ref()
+            .map(|raw| ForkCondition::Timestamp(raw.time))
+            .unwrap_or(ForkCondition::Never);
+
         let state_override_fork0 = raw_fork0.map(|raw| {
-            op_chain_spec
-                .inner
-                .hardforks
-                .insert(ConduitOpHardfork::StateOverrideFork0, ForkCondition::Timestamp(raw.time));
-            StateOverrideFork0Config { updates: raw.updates }
+            let config = StateOverrideFork0Config { updates: raw.updates };
+
+            if exclude_state_override_from_fork_id(&op_chain_spec) {
+                eprintln!(
+                    "Excluding StateOverrideFork0 from fork ID calculation for chain ID {} at timestamp {}",
+                    op_chain_spec.inner.genesis.config.chain_id,
+                    raw.time
+                );
+            } else {
+                op_chain_spec.inner.hardforks.insert(
+                    ConduitOpHardfork::StateOverrideFork0,
+                    ForkCondition::Timestamp(raw.time),
+                );
+            }
+
+            config
         });
 
-        Ok(Arc::new(ConduitOpChainSpec { inner: op_chain_spec, state_override_fork0 }))
+        Ok(Arc::new(ConduitOpChainSpec {
+            inner: op_chain_spec,
+            state_override_fork0,
+            state_override_fork0_activation,
+        }))
     }
 }
 
@@ -274,6 +337,29 @@ mod tests {
                 }
             }
         });
+        serde_json::to_string(&genesis).unwrap()
+    }
+
+    fn with_conduit_fork_for_chain(chain_id: u64, time: u64) -> String {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_conduit_fork(time)).unwrap();
+        genesis["config"]["chainId"] = serde_json::json!(chain_id);
+        serde_json::to_string(&genesis).unwrap()
+    }
+
+    fn legacy_canyon_genesis(chain_id: u64, include_canyon: bool) -> String {
+        let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        let config = genesis["config"].as_object_mut().unwrap();
+        config.insert("chainId".to_string(), serde_json::json!(chain_id));
+        config.remove("shanghaiTime");
+        config.remove("cancunTime");
+        config.remove("ecotoneTime");
+        config.remove("fjordTime");
+        config.remove("graniteTime");
+        config.remove("holocene_time");
+        if !include_canyon {
+            config.remove("canyonTime");
+        }
         serde_json::to_string(&genesis).unwrap()
     }
 
@@ -346,6 +432,33 @@ mod tests {
     }
 
     #[test]
+    fn legacy_chain_ids_use_pre_shanghai_genesis_header() {
+        for &chain_id in LEGACY_CANYON_GENESIS_CHAIN_IDS {
+            let canyon_spec = parse_spec(&legacy_canyon_genesis(chain_id, true));
+            let pre_canyon_spec = parse_spec(&legacy_canyon_genesis(chain_id, false));
+
+            assert!(canyon_spec.op_fork_activation(OpHardfork::Canyon).active_at_timestamp(0));
+            assert_eq!(
+                canyon_spec.ethereum_fork_activation(EthereumHardfork::Shanghai),
+                ForkCondition::Timestamp(0),
+            );
+            assert_eq!(canyon_spec.genesis_header().withdrawals_root, None);
+            assert_eq!(canyon_spec.genesis_hash(), pre_canyon_spec.genesis_hash());
+        }
+    }
+
+    #[test]
+    fn unlisted_chain_id_keeps_upstream_canyon_genesis_header() {
+        let spec = parse_spec(&legacy_canyon_genesis(99999, true));
+
+        assert_eq!(
+            spec.ethereum_fork_activation(EthereumHardfork::Shanghai),
+            ForkCondition::Timestamp(0),
+        );
+        assert!(spec.genesis_header().withdrawals_root.is_some());
+    }
+
+    #[test]
     fn forks_iter_includes_custom_fork() {
         let spec = parse_spec(&with_conduit_fork(5000));
         let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
@@ -404,6 +517,36 @@ mod tests {
         // fork_filter.current() must agree with fork_id() at each stage.
         assert_eq!(spec.fork_filter(head_at(0)).current(), spec.fork_id(&head_at(0)));
         assert_eq!(spec.fork_filter(head_at(5000)).current(), spec.fork_id(&head_at(5000)));
+    }
+
+    #[test]
+    fn excluded_chain_ids_keep_custom_fork_out_of_fork_ids() {
+        for &chain_id in STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS {
+            let json = with_conduit_fork_for_chain(chain_id, 5000);
+            let spec = parse_spec(&json);
+            let op_spec: OpChainSpec = {
+                let mut genesis: serde_json::Value = serde_json::from_str(&json).unwrap();
+                genesis["config"].as_object_mut().unwrap().remove("conduit");
+                let genesis: Genesis = serde_json::from_value(genesis).unwrap();
+                genesis.into()
+            };
+
+            assert_eq!(
+                spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
+                ForkCondition::Timestamp(5000),
+            );
+            assert!(spec.is_state_override_fork0_active_at_timestamp(5000));
+
+            let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
+            assert!(
+                !names.contains(&"StateOverrideFork0"),
+                "forks_iter should not include custom fork for chain {chain_id}, got: {names:?}",
+            );
+
+            assert_eq!(spec.fork_id(&head_at(0)), op_spec.fork_id(&head_at(0)));
+            assert_eq!(spec.fork_id(&head_at(5000)), op_spec.fork_id(&head_at(5000)));
+            assert_eq!(spec.latest_fork_id(), op_spec.latest_fork_id());
+        }
     }
 
     /// Regression test: parse the saigon genesis fixture (used by e2e tests)
