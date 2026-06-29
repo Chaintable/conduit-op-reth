@@ -8,7 +8,8 @@ on:
 
 env:
   REGISTRY: public.ecr.aws/b2h7a5c4/chaintable
-  IMAGE_NAME: ronin-writer
+  IMAGE_NAME: conduit-op-reth
+  CHAINS: "ronin katana"
   DOCKERFILE: Dockerfile.debank
 
 jobs:
@@ -101,12 +102,25 @@ jobs:
           registry-type: public
 
       # release（非 prerelease）才打 latest；tag push / workflow_dispatch 只打 revision
-      - name: Create and push multi-arch manifest
+      - name: Create and push multi-arch manifest + per-chain writer aliases
         run: |
-          TAGS="-t ${REGISTRY}/${IMAGE_NAME}:${REVISION}"
+          NONPRE=""
           if [[ "${{ github.event_name }}" == "release" && "${{ github.event.release.prerelease }}" != "true" ]]; then
-            TAGS="$TAGS -t ${REGISTRY}/${IMAGE_NAME}:latest"
+            NONPRE="1"
           fi
-          docker buildx imagetools create $TAGS \
+          # base multi-arch manifest
+          docker buildx imagetools create \
+            -t ${REGISTRY}/${IMAGE_NAME}:${REVISION} \
             ${REGISTRY}/${IMAGE_NAME}:${REVISION}-amd64 \
             ${REGISTRY}/${IMAGE_NAME}:${REVISION}-arm64
+          # per-chain writer aliases (same digest); also :latest on a non-prerelease release
+          for c in ${CHAINS}; do
+            docker buildx imagetools create \
+              -t ${REGISTRY}/${c}-writer:${REVISION} \
+              ${REGISTRY}/${IMAGE_NAME}:${REVISION}
+            if [[ -n "$NONPRE" ]]; then
+              docker buildx imagetools create \
+                -t ${REGISTRY}/${c}-writer:latest \
+                ${REGISTRY}/${IMAGE_NAME}:${REVISION}
+            fi
+          done
