@@ -2,11 +2,11 @@
 
 Thanks for your interest in contributing.
 
-This repository is a **fork**: upstream [conduit-xyz/conduit-op-reth](https://github.com/conduit-xyz/conduit-op-reth)
+This repository is a **fork**: upstream [conduitxyz/conduit-op-reth](https://github.com/conduitxyz/conduit-op-reth)
 plus the [Chaintable pipeline](https://github.com/Chaintable/pipeline) tracer. It
 runs write node(s) that produce block data for the Chaintable data pipeline, for
 the chain(s) listed in this repository's CI configuration and README. It is not
-a general-purpose fork of conduit-xyz/conduit-op-reth.
+a general-purpose fork of conduitxyz/conduit-op-reth.
 
 **First, determine where your change belongs:**
 

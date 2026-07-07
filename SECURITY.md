@@ -1,6 +1,6 @@
 # Security Policy
 
-This repository is a **fork**: upstream [conduit-xyz/conduit-op-reth](https://github.com/conduit-xyz/conduit-op-reth)
+This repository is a **fork**: upstream [conduitxyz/conduit-op-reth](https://github.com/conduitxyz/conduit-op-reth)
 plus the [Chaintable pipeline](https://github.com/Chaintable/pipeline) tracer,
 which exports block data (headers, transactions, call traces, receipts, events,
 state diffs) to the Chaintable data pipeline.
@@ -10,11 +10,12 @@ on an unmodified upstream build?
 
 - **Upstream issue** — reproduces on vanilla upstream (typically consensus, p2p
   networking, EVM execution, transaction pool, standard RPC, storage). It affects
-  every user of the upstream client, not just this fork. The upstream
-  repository is not publicly accessible — **report it privately to us (see
-  below) and we will coordinate with the vendor.**
+  every user of the upstream client, not just this fork. **Report it to the
+  upstream project, not here.** The upstream project does not currently
+  document a security contact — check https://github.com/conduitxyz/conduit-op-reth/security.
 
-  Please do not disclose upstream vulnerabilities publicly.
+  We pick up upstream security fixes through periodic upstream merges; please do
+  not disclose upstream vulnerabilities here.
 
 - **This fork's issue** — only reproduces with this fork's binaries or published
   images, or involves the Chaintable pipeline layer: the pipeline tracer and its
