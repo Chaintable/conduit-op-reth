@@ -1,6 +1,6 @@
 # Chaintable write node
 
-> Fork of [conduit-xyz/conduit-op-reth](https://github.com/conduit-xyz/conduit-op-reth), with Chaintable pipeline patches.
+> Fork of [conduitxyz/conduit-op-reth](https://github.com/conduitxyz/conduit-op-reth), with Chaintable pipeline patches.
 
 ## Architecture
 
