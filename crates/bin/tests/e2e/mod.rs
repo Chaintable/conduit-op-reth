@@ -2,12 +2,11 @@ use alloy_primitives::{Address, B64, B256, Bytes, b256, hex};
 use conduit_op_reth_node::chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
-use reth_optimism_node::OpPayloadBuilderAttributes;
-use reth_payload_builder::EthPayloadBuilderAttributes;
-use reth_primitives_traits::WithEncoded;
+use reth_optimism_node::{OpPayloadAttributes, payload::OpPayloadAttrs};
 use std::sync::Arc;
 
 pub mod genesis_validation_test;
+pub mod proofs_history_test;
 pub mod state_override_test;
 
 /// Solidity contract preamble: PUSH1 0x80 PUSH1 0x40 MSTORE.
@@ -34,15 +33,14 @@ pub(crate) const BASE_GENESIS: &str =
     include_str!(concat!(env!("CARGO_WORKSPACE_DIR"), "/tests/fixtures/saigon-genesis.json"));
 
 /// Create OP payload attributes including the required L1 block info deposit tx.
-pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
-    timestamp: u64,
-) -> OpPayloadBuilderAttributes<T> {
+pub fn op_payload_attributes(timestamp: u64) -> OpPayloadAttrs {
     let attributes = alloy_rpc_types_engine::PayloadAttributes {
         timestamp,
         prev_randao: B256::ZERO,
         suggested_fee_recipient: Address::ZERO,
         withdrawals: Some(vec![]),
         parent_beacon_block_root: Some(B256::ZERO),
+        slot_number: None,
     };
 
     // L1 block info "set L1 block" deposit tx from OP mainnet block 124665056.
@@ -53,17 +51,15 @@ pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
         "7ef8f8a0683079df94aa5b9cf86687d739a60a9b4f0835e520ec4d664e2e415dca17a6df94deaddeaddeaddeaddeaddeaddeaddeaddead00019442000000000000000000000000000000000000158080830f424080b8a4440a5e200000146b000f79c500000000000000040000000066d052e700000000013ad8a3000000000000000000000000000000000000000000000000000000003ef1278700000000000000000000000000000000000000000000000000000000000000012fdf87b89884a61e74b322bbcf60386f543bfae7827725efaaf0ab1de2294a590000000000000000000000006887246668a3b87f54deb3b94ba47a6f63f32985"
     );
     let l1_info_raw = Bytes::from_static(&TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056);
-    let l1_info_tx = T::decode_2718(&mut l1_info_raw.as_ref())
-        .expect("failed to decode L1 block info deposit tx");
 
-    OpPayloadBuilderAttributes {
-        payload_attributes: EthPayloadBuilderAttributes::new(B256::ZERO, attributes),
-        transactions: vec![WithEncoded::new(l1_info_raw, l1_info_tx)],
-        no_tx_pool: false,
+    OpPayloadAttrs(OpPayloadAttributes {
+        payload_attributes: attributes,
+        transactions: Some(vec![l1_info_raw]),
+        no_tx_pool: Some(false),
         gas_limit: Some(30_000_000),
         eip_1559_params: Some(B64::ZERO),
         min_base_fee: Some(0),
-    }
+    })
 }
 
 /// Build genesis JSON with a `conduit.stateOverrideFork0` section injected.
@@ -75,10 +71,12 @@ pub fn build_genesis_with_override(
     let mut genesis: serde_json::Value =
         serde_json::from_str(BASE_GENESIS).expect("failed to parse base genesis");
 
-    // Jovian extra data: 17 bytes (version=1, zeros for eip1559 params/min base fee).
+    // Jovian extra data: 17 bytes (version=1, denominator=250, elasticity=6, min base fee=0).
+    // Because this fixture activates Jovian at genesis, the genesis header must carry valid
+    // Jovian base-fee params for the first child block to validate against its parent.
     let obj = genesis.as_object_mut().unwrap();
     obj.remove("extradata");
-    obj.insert("extraData".to_string(), serde_json::json!("0x0100000000000000000000000000000000"));
+    obj.insert("extraData".to_string(), serde_json::json!("0x01000000fa000000060000000000000000"));
 
     genesis["config"]["conduit"] = serde_json::json!({
         "stateOverrideFork0": {
@@ -132,8 +130,7 @@ macro_rules! launch_test_node {
         use reth_node_builder::{NodeBuilder, NodeHandle};
         use reth_tasks::Runtime as TaskRuntime;
 
-        let tasks = TaskRuntime::with_existing_handle(tokio::runtime::Handle::current())
-            .expect("failed to create task runtime");
+        let tasks = TaskRuntime::test();
         let node_config = crate::e2e::test_node_config($chain_spec);
         let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
             .testing_node(tasks.clone())
@@ -161,3 +158,92 @@ macro_rules! advance {
 }
 
 pub(crate) use advance;
+
+/// In-process equivalent of `conduit-op-reth proofs init`: backfill the proofs storage from
+/// the current chain state. Mirrors the body of upstream's `InitCommand::run_init`.
+pub fn initialize_proofs_storage<F, S>(provider: &F, storage: S) -> eyre::Result<()>
+where
+    F: reth_provider::DatabaseProviderFactory + reth_provider::BlockNumReader,
+    F::Provider: reth_provider::DBProvider + reth_provider::StorageSettingsCache,
+    S: reth_optimism_trie::OpProofsStore,
+{
+    use reth_chainspec::ChainInfo;
+    use reth_optimism_trie::{InitializationJob, RethTrieStorageLayout};
+    use reth_provider::{DBProvider as _, StorageSettingsCache as _};
+
+    let ChainInfo { best_number, best_hash, .. } = provider.chain_info()?;
+    let db_provider = provider.database_provider_ro()?.disable_long_read_transaction_safety();
+    let trie_layout = if db_provider.cached_storage_settings().is_v2() {
+        RethTrieStorageLayout::Packed
+    } else {
+        RethTrieStorageLayout::Legacy
+    };
+    InitializationJob::new(storage, db_provider.into_tx(), trie_layout)
+        .run(best_number, best_hash)?;
+    Ok(())
+}
+
+/// Launch a test node with the proofs-history ExEx and RPC overrides installed,
+/// mirroring `conduit_op_reth_node::launcher::launch_with_proof_history`.
+///
+/// The verification interval is 1: the ExEx replay engine re-executes every block with the
+/// node's EVM config. If proof replay ever stops using `ConduitOpEvmConfig`, re-executing a
+/// `StateOverrideFork0` transition block diverges and the ExEx (and the test) fails.
+macro_rules! launch_test_node_with_proofs {
+    ($chain_spec:expr, $proofs_dir:expr, $store_ty:ty) => {{
+        use futures_util::FutureExt as _;
+        use reth_e2e_test_utils::node::NodeTestContext;
+        use reth_node_builder::{FullNodeComponents as _, NodeBuilder, NodeHandle};
+        use reth_optimism_exex::OpProofsExEx;
+        use reth_optimism_rpc::{
+            debug::{DebugApiExt, DebugApiOverrideServer},
+            eth::proofs::{EthApiExt, EthApiOverrideServer},
+        };
+        use reth_optimism_trie::OpProofsStorage;
+        use reth_tasks::Runtime as TaskRuntime;
+        use std::sync::Arc;
+
+        let tasks = TaskRuntime::test();
+        let node_config = crate::e2e::test_node_config($chain_spec);
+
+        let mdbx = Arc::new(<$store_ty>::new($proofs_dir)?);
+        let storage: OpProofsStorage<Arc<$store_ty>> = mdbx.clone().into();
+        let storage_exex = storage.clone();
+        let storage_rpc = storage;
+
+        let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
+            .testing_node(tasks.clone())
+            .node(conduit_op_reth_node::node::ConduitOpNode::default())
+            .install_exex("proofs-history", async move |exex_context| {
+                // The CLI requires `proofs init` before boot; in-process we run the same
+                // initialization job against the freshly-written genesis state.
+                crate::e2e::initialize_proofs_storage(exex_context.provider(), mdbx)?;
+                Ok(OpProofsExEx::builder(exex_context, storage_exex)
+                    .with_verification_interval(1)
+                    .build()
+                    .run()
+                    .boxed())
+            })
+            .extend_rpc_modules(move |ctx| {
+                let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage_rpc.clone());
+                let debug_ext = DebugApiExt::new(
+                    ctx.node().provider().clone(),
+                    ctx.registry.eth_api().clone(),
+                    storage_rpc,
+                    ctx.node().task_executor().clone(),
+                    ctx.node().evm_config().clone(),
+                );
+                let eth_replaced = ctx.modules.replace_configured(api_ext.into_rpc())?;
+                let debug_replaced = ctx.modules.replace_configured(debug_ext.into_rpc())?;
+                assert!(eth_replaced && debug_replaced, "proofs RPC overrides must install");
+                Ok(())
+            })
+            .launch()
+            .await?;
+
+        let ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
+        (tasks, ctx)
+    }};
+}
+
+pub(crate) use launch_test_node_with_proofs;

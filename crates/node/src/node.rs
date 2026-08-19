@@ -1,26 +1,34 @@
 use crate::{
-    chainspec::ConduitOpChainSpec, eth_api_builder::ConduitOpEthApiBuilder,
-    evm::ConduitOpExecutorBuilder,
+    chainspec::ConduitOpChainSpec,
+    evm::{ConduitOpExecutorBuilder, conduit_evm_limits},
+    trace::{OpDebankTraceApiImpl, OpDebankTraceApiServer},
 };
 use reth_engine_local::LocalPayloadAttributesBuilder;
+use reth_evm::EvmLimitParams;
 use reth_node_api::{FullNodeComponents, PayloadAttributesBuilder, PayloadTypes};
 use reth_node_builder::{
     DebugNode, Node, NodeAdapter, NodeComponentsBuilder, NodeTypes,
     components::{BasicPayloadServiceBuilder, ComponentsBuilder},
     node::FullNodeTypes,
-    rpc::{BasicEngineValidatorBuilder, RpcAddOns},
+    rpc::BasicEngineValidatorBuilder,
 };
 use reth_optimism_node::{
     OpDAConfig, OpEngineApiBuilder, OpEngineTypes, OpStorage,
     args::RollupArgs,
     node::{
-        OpAddOns, OpConsensusBuilder, OpEngineValidatorBuilder, OpFullNodeTypes, OpNetworkBuilder,
-        OpNodeTypes, OpPayloadBuilder, OpPoolBuilder,
+        OpAddOns, OpAddOnsBuilder, OpConsensusBuilder, OpEngineValidatorBuilder, OpFullNodeTypes,
+        OpNetworkBuilder, OpNodeTypes, OpPayloadBuilder, OpPoolBuilder,
     },
 };
-use reth_optimism_payload_builder::config::OpGasLimitConfig;
+use reth_optimism_payload_builder::{
+    OpPayloadAttrs,
+    config::{OpGasLimitConfig, SdmPostExecOptIn},
+};
 use reth_optimism_primitives::OpPrimitives;
+use reth_optimism_rpc::eth::OpEthApiBuilder;
+use reth_optimism_txpool::interop::InteropFailsafe;
 use reth_primitives_traits::SealedHeader;
+use reth_rpc_server_types::RethRpcModule;
 use std::sync::Arc;
 
 /// Type configuration for the ConduitOp OP Stack node.
@@ -40,6 +48,16 @@ pub struct ConduitOpNode {
     /// Used to control the gas limit of the blocks produced by the OP builder (configured by the
     /// batcher via the `miner_` api).
     pub gas_limit_config: OpGasLimitConfig,
+    /// Local operator opt-in for SDM `PostExec` production.
+    pub sdm_post_exec_opt_in: SdmPostExecOptIn,
+    /// Interop failsafe gate shared between the txpool's interop filter client and payload
+    /// builder.
+    pub interop_failsafe: InteropFailsafe,
+    /// Optional EVM limit overrides (e.g. Conduit's higher code/initcode sizes).
+    ///
+    /// When `Some`, the executor in the node pipeline applies these limits to every EVM
+    /// environment. When `None`, standard OP Stack defaults apply.
+    pub evm_limits: Option<EvmLimitParams>,
 }
 
 impl ConduitOpNode {
@@ -49,6 +67,9 @@ impl ConduitOpNode {
             args,
             da_config: OpDAConfig::default(),
             gas_limit_config: OpGasLimitConfig::default(),
+            sdm_post_exec_opt_in: SdmPostExecOptIn::default(),
+            interop_failsafe: InteropFailsafe::default(),
+            evm_limits: None,
         }
     }
 
@@ -61,6 +82,12 @@ impl ConduitOpNode {
     /// Configure the gas limit configuration for the OP builder.
     pub fn with_gas_limit_config(mut self, gas_limit_config: OpGasLimitConfig) -> Self {
         self.gas_limit_config = gas_limit_config;
+        self
+    }
+
+    /// Enable Conduit's higher EVM limits (614KB max code size, 1.2MB max initcode size).
+    pub fn with_evm_limits(mut self, enabled: bool) -> Self {
+        self.evm_limits = enabled.then(conduit_evm_limits);
         self
     }
 }
@@ -89,7 +116,7 @@ where
 
     type AddOns = OpAddOns<
         NodeAdapter<N, <Self::ComponentsBuilder as NodeComponentsBuilder<N>>::Components>,
-        ConduitOpEthApiBuilder,
+        OpEthApiBuilder,
         OpEngineValidatorBuilder,
         OpEngineApiBuilder<OpEngineValidatorBuilder>,
         BasicEngineValidatorBuilder<OpEngineValidatorBuilder>,
@@ -100,56 +127,48 @@ where
             self.args;
         ComponentsBuilder::default()
             .node_types::<N>()
+            .executor(ConduitOpExecutorBuilder { limits: self.evm_limits })
             .pool(
                 OpPoolBuilder::default()
                     .with_enable_tx_conditional(self.args.enable_tx_conditional)
-                    .with_supervisor(
-                        self.args.supervisor_http.clone(),
-                        self.args.supervisor_safety_level,
-                    ),
+                    .with_interop(
+                        self.args.interop_http.clone(),
+                        self.args.interop_min_responses,
+                        self.args.interop_safety_level,
+                    )
+                    .with_interop_failsafe(self.interop_failsafe.clone()),
             )
-            .executor(ConduitOpExecutorBuilder)
             .payload(BasicPayloadServiceBuilder::new(
                 OpPayloadBuilder::new(compute_pending_block)
                     .with_da_config(self.da_config.clone())
-                    .with_gas_limit_config(self.gas_limit_config.clone()),
+                    .with_gas_limit_config(self.gas_limit_config.clone())
+                    .with_sdm_post_exec_opt_in(self.sdm_post_exec_opt_in.clone())
+                    .with_interop_failsafe(self.interop_failsafe.clone())
+                    .with_max_uncompressed_block_size(self.args.max_uncompressed_block_size),
             ))
             .network(OpNetworkBuilder::new(disable_txpool_gossip, !discovery_v4))
             .consensus(OpConsensusBuilder::default())
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        // UPSTREAM SYNC: line-for-line copy of `OpAddOnsBuilder::build()` from
-        // op-reth `crates/node/src/node.rs` @ tag `op-reth/v1.11.5`.
-        // Intentional delta: `OpEthApiBuilder` -> `ConduitOpEthApiBuilder` to inject
-        // `ConduitOpReceiptConverter` (provides real `get_deposit_nonce`/`get_l1_fee`).
-        // Defaults mirror `OpAddOnsBuilder::default()`: `tokio_runtime = None`,
-        // `rpc_middleware = Identity::new()`. When upgrading op-reth, re-diff this
-        // function against the new upstream `build()` body. The witness consts below
-        // catch constructor signature drift at compile time; new hidden builder setters
-        // require manual sync.
-        OpAddOns::new(
-            RpcAddOns::new(
-                ConduitOpEthApiBuilder::default()
-                    .with_sequencer(self.args.sequencer.clone())
-                    .with_sequencer_headers(self.args.sequencer_headers.clone())
-                    .with_min_suggested_priority_fee(self.args.min_suggested_priority_fee)
-                    .with_flashblocks(self.args.flashblocks_url.clone())
-                    .with_flashblock_consensus(self.args.flashblock_consensus),
-                OpEngineValidatorBuilder::default(),
-                OpEngineApiBuilder::<OpEngineValidatorBuilder>::default(),
-                BasicEngineValidatorBuilder::<OpEngineValidatorBuilder>::default(),
-                reth_node_builder::rpc::Identity::new(),
-            )
-            .with_tokio_runtime(None),
-            self.da_config.clone(),
-            self.gas_limit_config.clone(),
-            self.args.sequencer.clone(),
-            self.args.sequencer_headers.clone(),
-            self.args.historical_rpc.clone(),
-            self.args.enable_tx_conditional,
-            self.args.min_suggested_priority_fee,
-        )
+        OpAddOnsBuilder::default()
+            .with_sequencer(self.args.sequencer.clone())
+            .with_sequencer_headers(self.args.sequencer_headers.clone())
+            .with_da_config(self.da_config.clone())
+            .with_gas_limit_config(self.gas_limit_config.clone())
+            .with_sdm_post_exec_opt_in(self.sdm_post_exec_opt_in.clone())
+            .with_enable_tx_conditional(self.args.enable_tx_conditional)
+            .with_min_suggested_priority_fee(self.args.min_suggested_priority_fee)
+            .with_historical_rpc(self.args.historical_rpc.clone())
+            .with_flashblocks(self.args.flashblocks_url.clone())
+            .with_flashblock_consensus(self.args.flashblock_consensus)
+            .build()
+            .extend_rpc_modules(|ctx| {
+                let debank_api = OpDebankTraceApiImpl::new(ctx.registry.eth_api().clone());
+                ctx.modules
+                    .merge_if_module_configured(RethRpcModule::Trace, debank_api.into_rpc())?;
+                Ok(())
+            })
     }
 }
 
@@ -169,7 +188,23 @@ where
         let inner = LocalPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()));
         // This allows us to run --dev mode. Fixed in upstream https://github.com/paradigmxyz/reth/pull/21855/changes
         move |parent: SealedHeader| {
-            let mut attrs: op_alloy_rpc_types_engine::OpPayloadAttributes = inner.build(&parent);
+            // L1-info deposit system transaction, injected as tx[0] of every dev block.
+            // Without it op-reth's `extract_l1_info` has no L1 block info to parse, so
+            // `eth_getTransactionReceipt` fails with "invalid l1 block info transaction
+            // calldata in the L2 block". OP Mainnet transaction at index 0 in block
+            // 124665056; matches upstream `OpLocalPayloadAttributesBuilder`.
+            const TX_SET_L1_BLOCK: [u8; 251] = alloy_primitives::hex!(
+                "7ef8f8a0683079df94aa5b9cf86687d739a60a9b4f0835e520ec4d664e2e415dca17a6df94deaddeaddeaddeaddeaddeaddeaddeaddead00019442000000000000000000000000000000000000158080830f424080b8a4440a5e200000146b000f79c500000000000000040000000066d052e700000000013ad8a3000000000000000000000000000000000000000000000000000000003ef1278700000000000000000000000000000000000000000000000000000000000000012fdf87b89884a61e74b322bbcf60386f543bfae7827725efaaf0ab1de2294a590000000000000000000000006887246668a3b87f54deb3b94ba47a6f63f32985"
+            );
+
+            let mut attrs = op_alloy_rpc_types_engine::OpPayloadAttributes {
+                payload_attributes: inner.build(&parent),
+                transactions: Some(vec![TX_SET_L1_BLOCK.into()]),
+                no_tx_pool: None,
+                gas_limit: None,
+                eip_1559_params: None,
+                min_base_fee: None,
+            };
 
             // Encode default OP EIP-1559 params: denominator=50, elasticity=6
             attrs.eip_1559_params = Some(alloy_primitives::B64::from_slice(&[
@@ -177,47 +212,7 @@ where
                 0, 0, 0, 6, // elasticity
             ]));
             attrs.min_base_fee = Some(0);
-            attrs
+            OpPayloadAttrs(attrs)
         }
-    }
-}
-
-// Compile-time signature pins. If upstream changes the parameter count or order
-// of `RpcAddOns::new` or `OpAddOns::new`, these `const` assignments fail to type-check,
-// pointing the reviewer at `add_ons()` above. They DO NOT catch new hidden builder
-// setters or default-value changes - that still requires manual re-diff per the
-// UPSTREAM SYNC comment in `add_ons()`.
-#[allow(dead_code, clippy::type_complexity)]
-mod upstream_signature_pins {
-    use reth_node_api::FullNodeComponents;
-    use reth_node_builder::rpc::{EthApiBuilder, Identity, RpcAddOns};
-    use reth_optimism_node::{OpDAConfig, node::OpAddOns};
-    use reth_optimism_payload_builder::config::OpGasLimitConfig;
-
-    fn pin_rpc_add_ons_new<N, EthB, PVB, EB, EVB>()
-    where
-        N: FullNodeComponents,
-        EthB: EthApiBuilder<N>,
-    {
-        let _: fn(EthB, PVB, EB, EVB, Identity) -> RpcAddOns<N, EthB, PVB, EB, EVB, Identity> =
-            RpcAddOns::<N, EthB, PVB, EB, EVB, Identity>::new;
-    }
-
-    fn pin_op_add_ons_new<N, EthB, PVB, EB, EVB>()
-    where
-        N: FullNodeComponents,
-        EthB: EthApiBuilder<N>,
-    {
-        let _: fn(
-            RpcAddOns<N, EthB, PVB, EB, EVB, Identity>,
-            OpDAConfig,
-            OpGasLimitConfig,
-            Option<String>,
-            Vec<String>,
-            Option<String>,
-            bool,
-            u64,
-        ) -> OpAddOns<N, EthB, PVB, EB, EVB, Identity> =
-            OpAddOns::<N, EthB, PVB, EB, EVB, Identity>::new;
     }
 }

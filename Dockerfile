@@ -4,7 +4,7 @@
 ARG FEATURES
 ARG BUILD_PROFILE=maxperf
 
-FROM rust:1.92 AS base
+FROM rust:1.94 AS base
 ARG TARGETPLATFORM
 
 RUN apt-get update \
@@ -67,7 +67,7 @@ ARG BUILD_PROFILE=maxperf
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    cargo build --profile $BUILD_PROFILE --features="$FEATURES" --package=conduit-op-reth
+    cargo build --locked --profile $BUILD_PROFILE --features="$FEATURES" --package=conduit-op-reth
 
 #
 # Runtime container
