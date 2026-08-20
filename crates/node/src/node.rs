@@ -1,6 +1,7 @@
 use crate::{
     chainspec::ConduitOpChainSpec,
     evm::{ConduitOpExecutorBuilder, conduit_evm_limits},
+    trace::{OpDebankTraceApiImpl, OpDebankTraceApiServer},
 };
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_evm::EvmLimitParams;
@@ -27,6 +28,7 @@ use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::eth::OpEthApiBuilder;
 use reth_optimism_txpool::interop::InteropFailsafe;
 use reth_primitives_traits::SealedHeader;
+use reth_rpc_server_types::RethRpcModule;
 use std::sync::Arc;
 
 /// Type configuration for the ConduitOp OP Stack node.
@@ -161,6 +163,12 @@ where
             .with_flashblocks(self.args.flashblocks_url.clone())
             .with_flashblock_consensus(self.args.flashblock_consensus)
             .build()
+            .extend_rpc_modules(|ctx| {
+                let debank_api = OpDebankTraceApiImpl::new(ctx.registry.eth_api().clone());
+                ctx.modules
+                    .merge_if_module_configured(RethRpcModule::Trace, debank_api.into_rpc())?;
+                Ok(())
+            })
     }
 }
 

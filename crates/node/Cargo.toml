@@ -26,6 +26,10 @@ reth-db.workspace = true
 reth-db-api.workspace = true
 reth-tasks.workspace = true
 reth-rpc-eth-api.workspace = true
+reth-rpc-eth-types.workspace = true
+reth-rpc-server-types.workspace = true
+reth-storage-api.workspace = true
+reth-trie.workspace = true
 
 alloy-primitives.workspace = true
 alloy-genesis.workspace = true
@@ -33,14 +37,19 @@ alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-op-evm.workspace = true
+alloy-network.workspace = true
+alloy-rlp.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-json-rpc.workspace = true
 op-alloy-consensus.workspace = true
+op-alloy-rpc-types.workspace = true
 op-alloy-rpc-types-engine.workspace = true
 
 revm.workspace = true
 op-revm.workspace = true
 reth-revm.workspace = true
+revm-bytecode.workspace = true
+revm-inspectors.workspace = true
 
 tracing.workspace = true
 serde.workspace = true
@@ -52,6 +61,9 @@ eyre.workspace = true
 futures-util.workspace = true
 tokio.workspace = true
 jsonrpsee = { workspace = true, features = ["server", "macros", "client"] }
+async-trait.workspace = true
+sha1.workspace = true
+md-5.workspace = true
 
 [features]
 asm-keccak = [
