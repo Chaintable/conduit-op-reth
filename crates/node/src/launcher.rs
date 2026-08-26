@@ -9,6 +9,7 @@ use crate::{
     chainspec::ConduitOpChainSpec,
     flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
     node::ConduitOpNode,
+    trace::{OpDebankTraceApiImpl, OpDebankTraceApiServer},
 };
 use eyre::ErrReport;
 use futures_util::FutureExt;
@@ -27,6 +28,7 @@ use reth_optimism_trie::{
     db::{MdbxProofsStorage, MdbxProofsStorageV2},
 };
 use reth_rpc_eth_api::{EthApiTypes, helpers::FullEthApi};
+use reth_rpc_server_types::RethRpcModule;
 use reth_tasks::TaskExecutor;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -43,7 +45,12 @@ pub async fn launch_node(
         let handle = builder
             .node(ConduitOpNode::new(args))
             .extend_rpc_modules(move |mut ctx| {
-                install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)
+                install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
+                // This hook replaces the one in `ConduitOpNode::add_ons`, so preserve the API.
+                let debank_api = OpDebankTraceApiImpl::new(ctx.registry.eth_api().clone());
+                ctx.modules
+                    .merge_if_module_configured(RethRpcModule::Trace, debank_api.into_rpc())?;
+                Ok(())
             })
             .launch_with_debug_capabilities()
             .await?;
@@ -110,6 +117,10 @@ where
         })
         .extend_rpc_modules(move |mut ctx| {
             install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
+            // This hook replaces the one in `ConduitOpNode::add_ons`, so preserve the API.
+            let debank_api = OpDebankTraceApiImpl::new(ctx.registry.eth_api().clone());
+            ctx.modules
+                .merge_if_module_configured(RethRpcModule::Trace, debank_api.into_rpc())?;
 
             info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
             let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
