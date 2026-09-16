@@ -8,9 +8,12 @@
 use crate::{
     chainspec::ConduitOpChainSpec,
     flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
+    hardforks::{ConduitOpHardfork, ConduitOpHardforks},
     node::ConduitOpNode,
+    slipstream::SlipstreamProxy,
     trace::{OpDebankTraceApiImpl, OpDebankTraceApiServer},
 };
+use conduit_op_reth_rpc_api::SlipstreamApiServer;
 use eyre::ErrReport;
 use futures_util::FutureExt;
 use jsonrpsee::types::ErrorObject;
@@ -20,6 +23,7 @@ use reth_node_builder::{FullNodeComponents, NodeBuilder, WithLaunchContext, rpc:
 use reth_optimism_exex::OpProofsExEx;
 use reth_optimism_node::args::{ProofsStorageVersion, RollupArgs};
 use reth_optimism_rpc::{
+    SequencerClient,
     debug::{DebugApiExt, DebugApiOverrideServer},
     eth::proofs::{EthApiExt, EthApiOverrideServer},
 };
@@ -32,20 +36,40 @@ use reth_rpc_server_types::RethRpcModule;
 use reth_tasks::TaskExecutor;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Launches a Conduit OP-Reth node, optionally installing the proof-history ExEx and RPC
 /// overrides.
 pub async fn launch_node(
     builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
     args: RollupArgs,
+    slipstream_enabled: bool,
 ) -> eyre::Result<(), ErrReport> {
+    validate_slipstream_config(&args, slipstream_enabled)?;
+    let config = builder.config();
+    if let Some(max_initcode_size) =
+        config.chain.evm_limits_fork0.and_then(|limits| limits.max_initcode_size) &&
+        max_initcode_size >= config.txpool.max_tx_input_bytes
+    {
+        let max_tx_input_bytes = config.txpool.max_tx_input_bytes;
+        let activation = config.chain.conduit_op_fork_activation(ConduitOpHardfork::EvmLimitsFork0);
+        warn!(
+            target: "reth::cli",
+            max_initcode_size,
+            max_tx_input_bytes,
+            ?activation,
+            "EvmLimitsFork0 permits initcode that the configured transaction pool cannot admit; raise --txpool.max-tx-input-bytes and restart the node"
+        );
+    }
+
     if !args.proofs_history {
         let flashblocks_enabled = args.flashblocks_url.is_some();
         let handle = builder
             .node(ConduitOpNode::new(args))
             .extend_rpc_modules(move |mut ctx| {
+                let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
                 install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
+                install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)?;
                 // This hook replaces the one in `ConduitOpNode::add_ons`, so preserve the API.
                 let debank_api = OpDebankTraceApiImpl::new(ctx.registry.eth_api().clone());
                 ctx.modules
@@ -67,7 +91,7 @@ pub async fn launch_node(
                 MdbxProofsStorage::new(&path)
                     .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorage: {e}"))?,
             );
-            launch_with_proof_history(builder, args, mdbx).await
+            launch_with_proof_history(builder, args, mdbx, slipstream_enabled).await
         }
         ProofsStorageVersion::V2 => {
             info!(target: "reth::cli", "Using on-disk storage for proofs history (v2)");
@@ -75,7 +99,7 @@ pub async fn launch_node(
                 MdbxProofsStorageV2::new(&path)
                     .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorageV2: {e}"))?,
             );
-            launch_with_proof_history(builder, args, mdbx).await
+            launch_with_proof_history(builder, args, mdbx, slipstream_enabled).await
         }
     }
 }
@@ -85,6 +109,7 @@ async fn launch_with_proof_history<S>(
     builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
     args: RollupArgs,
     mdbx: Arc<S>,
+    slipstream_enabled: bool,
 ) -> eyre::Result<(), ErrReport>
 where
     S: OpProofsStore + DatabaseMetrics + Send + Sync + 'static,
@@ -116,7 +141,9 @@ where
                 .boxed())
         })
         .extend_rpc_modules(move |mut ctx| {
+            let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
             install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
+            install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)?;
             // This hook replaces the one in `ConduitOpNode::add_ons`, so preserve the API.
             let debank_api = OpDebankTraceApiImpl::new(ctx.registry.eth_api().clone());
             ctx.modules
@@ -145,6 +172,15 @@ where
     handle.node_exit_future.await
 }
 
+fn validate_slipstream_config(args: &RollupArgs, slipstream_enabled: bool) -> eyre::Result<()> {
+    if !slipstream_enabled {
+        return Ok(());
+    }
+
+    eyre::ensure!(args.sequencer.is_some(), "--conduit.slipstream requires --rollup.sequencer");
+    Ok(())
+}
+
 /// Installs the flashblocks pending-state RPC overrides (`eth_call`, `eth_estimateGas`,
 /// `eth_simulateV1`) when flashblocks are enabled.
 fn install_flashblocks_call_overrides<N, EthApi>(
@@ -164,6 +200,33 @@ where
     let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
     ctx.modules.add_or_replace_configured(ext.into_rpc())?;
     info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
+    Ok(())
+}
+
+/// Proxies the public Slipstream batch API when the replica explicitly opts in.
+fn install_slipstream_batch_proxy<N, EthApi>(
+    ctx: &mut RpcContext<'_, N, EthApi>,
+    slipstream_enabled: bool,
+    sequencer_client: Option<SequencerClient>,
+) -> eyre::Result<()>
+where
+    N: FullNodeComponents,
+    EthApi: EthApiTypes,
+{
+    if !slipstream_enabled {
+        return Ok(());
+    }
+
+    let sequencer_client = sequencer_client.ok_or_else(|| {
+        eyre::eyre!("Slipstream enabled but the eth API has no configured sequencer client")
+    })?;
+    info!(
+        target: "reth::cli",
+        endpoint = sequencer_client.endpoint(),
+        "Installing Slipstream batch proxy"
+    );
+    let proxy = SlipstreamProxy::new(sequencer_client);
+    ctx.modules.add_or_replace_configured(SlipstreamApiServer::into_rpc(proxy))?;
     Ok(())
 }
 
@@ -187,4 +250,24 @@ fn spawn_proofs_db_metrics<S>(
             storage.report_metrics();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slipstream_config_is_optional() {
+        validate_slipstream_config(&RollupArgs::default(), false).unwrap();
+    }
+
+    #[test]
+    fn slipstream_requires_sequencer() {
+        let error = validate_slipstream_config(&RollupArgs::default(), true).unwrap_err();
+        assert!(error.to_string().contains("--rollup.sequencer"));
+
+        let args =
+            RollupArgs { sequencer: Some("http://sequencer:80".to_string()), ..Default::default() };
+        validate_slipstream_config(&args, true).unwrap();
+    }
 }
