@@ -1,6 +1,7 @@
 use crate::debank::{
-    BlockFile, BlockStorageDiff, DebankBlock, DebankOutPut, DebankTransaction, build_debank_traces,
-    build_genesis_txs_and_traces, get_storage_contracts_from_bundle,
+    BlockFile, BlockStorageDiff, DebankBlock, DebankOutPut, DebankTransaction,
+    RONIN_MIGRATION_BLOCK, build_debank_traces, build_genesis_txs_and_traces,
+    build_ronin_migration_txs_and_traces, get_storage_contracts_from_bundle,
     get_storage_contracts_from_genesis, get_storage_diffs_from_changesets,
 };
 use alloy_consensus::{BlockHeader, transaction::TxHashRef};
@@ -29,7 +30,6 @@ use revm_bytecode::opcode::OpCode;
 use revm_inspectors::tracing::{OpcodeFilter, TracingInspector, TracingInspectorConfig};
 
 const RONIN_CHAIN_ID: u64 = 2020;
-const RONIN_SYNTHETIC_GENESIS_BLOCK: u64 = 55_577_500;
 const RONIN_SYNTHETIC_GENESIS_PARENT_STATE: B256 =
     b256!("a8fe53c7551bc10fae45cd0273e2008b26585eaf16dce34aff7291d36bb1c8d4");
 const RONIN_SYNTHETIC_GENESIS_PARENT_HASH: B256 =
@@ -202,7 +202,7 @@ enum GenesisKind {
 }
 
 fn is_ronin_synthetic_genesis(chain_id: u64, block_number: u64) -> bool {
-    chain_id == RONIN_CHAIN_ID && block_number == RONIN_SYNTHETIC_GENESIS_BLOCK
+    chain_id == RONIN_CHAIN_ID && block_number == RONIN_MIGRATION_BLOCK
 }
 
 fn build_genesis_output(
@@ -224,7 +224,8 @@ fn build_genesis_output(
             state_diff.parent_hash = RONIN_SYNTHETIC_GENESIS_PARENT_STATE;
             debank_block.parent_id = RONIN_SYNTHETIC_GENESIS_PARENT_HASH;
             header.inner.parent_hash = RONIN_SYNTHETIC_GENESIS_PARENT_HASH;
-            (Vec::new(), Vec::new(), Vec::new())
+            let (transactions, traces) = build_ronin_migration_txs_and_traces(genesis);
+            (transactions, traces, get_storage_contracts_from_genesis(genesis))
         }
     };
 
@@ -365,4 +366,145 @@ where
         Ok((results, storage_diff, change_addresses))
     })
     .await
+}
+
+#[cfg(test)]
+mod genesis_tests {
+    use super::*;
+    use alloy_primitives::{Address, U256, address};
+    use std::collections::HashSet;
+
+    fn migration_fixture() -> Genesis {
+        serde_json::from_value(serde_json::json!({
+            "config": { "chainId": 2020 },
+            "gasLimit": "0x3938700", "difficulty": "0x0",
+            "alloc": {
+                "0000000000000000000000000000000000000011": {"balance":"0x1","code":"0x6011"},
+                "0000000000000000000000000000000000000022": {"balance":"0x0","code":"0x6022"},
+                "0000000000000000000000000000000000000033": {"balance":"0x0","code":"0x6033"},
+                "ed4a9f48a62fb6fdcfb45bb00c9f61d1a436e58c": {"balance":"0x9","code":"0x60ed"},
+                "13b0d85ccb8bf860b6b79af3029fca081ae9bef2": {"balance":"0x7","code":"0x6013"},
+                "914d7fec6aac8cd542e72bca78b30650d45643d7": {"balance":"0x0","code":"0x6091","storage":{"0x01":"0x02"}}
+            }
+        }))
+        .unwrap()
+    }
+
+    fn output(genesis: &Genesis, kind: GenesisKind) -> DebankOutPut {
+        build_genesis_output(
+            DebankBlock { height: RONIN_MIGRATION_BLOCK, ..Default::default() },
+            Header::default(),
+            genesis,
+            B256::repeat_byte(0x42),
+            kind,
+        )
+    }
+
+    #[test]
+    fn ronin_migration_emits_records_without_repeating_original_genesis_kinds() {
+        let result = output(&migration_fixture(), GenesisKind::RoninSynthetic);
+        let file = result.block_file;
+        assert_eq!(file.transactions.len(), 5);
+        assert_eq!(file.traces.len(), 5);
+        assert_eq!(file.transactions[0].to, address!("0000000000000000000000000000000000000011"));
+        assert_eq!(file.transactions[0].value, U256::from(1));
+        assert_eq!(file.traces[0].call_create_type, "call");
+        assert_eq!(file.traces.last().unwrap().call_create_type, "create");
+        assert_eq!(
+            file.transactions.last().unwrap().to,
+            address!("ed4a9f48a62fb6fdcfb45bb00c9f61d1a436e58c")
+        );
+        assert!(file.transactions.iter().all(|tx| tx.to != Address::repeat_byte(0xee)));
+        assert_eq!(
+            file.storage_contracts,
+            vec![address!("914d7fec6aac8cd542e72bca78b30650d45643d7")]
+        );
+        assert_eq!(result.validation_hash, file.validation().validation_hash);
+    }
+
+    #[test]
+    fn ronin_migration_ids_and_trace_links_are_stable_bytes32() {
+        let first = output(&migration_fixture(), GenesisKind::RoninSynthetic);
+        let second = output(&migration_fixture(), GenesisKind::RoninSynthetic);
+        assert_eq!(
+            serde_json::to_value(&first.block_file).unwrap(),
+            serde_json::to_value(&second.block_file).unwrap()
+        );
+        let txs = &first.block_file.transactions;
+        assert!(!txs.is_empty());
+        let mut ids = HashSet::new();
+        let mut trace_ids = HashSet::new();
+        for (index, (tx, trace)) in txs.iter().zip(&first.block_file.traces).enumerate() {
+            assert!(tx.id.parse::<B256>().is_ok());
+            assert!(ids.insert(&tx.id));
+            assert!(trace_ids.insert(&trace.id));
+            assert_eq!(tx.transaction_index, index as u64);
+            assert_eq!(trace.tx_id, tx.id);
+            assert_eq!(tx.from, Address::ZERO);
+            assert_eq!(tx.gas_limit, 0);
+            assert_eq!(tx.gas_price, 0);
+            assert_eq!(tx.gas_used, 0);
+            assert!(tx.status);
+            assert!(trace.parent_trace_id.is_empty());
+            if trace.call_create_type == "create" {
+                assert_eq!(trace.output, tx.input);
+                assert_eq!(trace.input, tx.input);
+            }
+        }
+        let tx = txs
+            .iter()
+            .find(|tx| tx.to == address!("914d7fec6aac8cd542e72bca78b30650d45643d7"))
+            .unwrap();
+        assert_eq!(tx.id, "0x020000000000000003500b9c914d7fec6aac8cd542e72bca78b30650d45643d7");
+        let trace = first.block_file.traces.iter().find(|trace| trace.tx_id == tx.id).unwrap();
+        assert_eq!(trace.id, "f6609a36881a7832e4c53f78d9dd30e5");
+    }
+
+    #[test]
+    fn migration_keeps_existing_state_diff_and_header_linkage() {
+        let genesis = migration_fixture();
+        let result = output(&genesis, GenesisKind::RoninSynthetic);
+        let mut expected_diff: BlockStorageDiff = (&genesis).into();
+        expected_diff.hash = B256::repeat_byte(0x42);
+        expected_diff.parent_hash = RONIN_SYNTHETIC_GENESIS_PARENT_STATE;
+        assert_eq!(result.state_diff.as_ref(), alloy_rlp::encode(expected_diff));
+        assert_eq!(result.header.inner.parent_hash, RONIN_SYNTHETIC_GENESIS_PARENT_HASH);
+        assert_eq!(result.block_file.block.parent_id, RONIN_SYNTHETIC_GENESIS_PARENT_HASH);
+        assert!(is_ronin_synthetic_genesis(2020, 55_577_500));
+        assert!(!is_ronin_synthetic_genesis(2020, 55_577_499));
+        assert!(!is_ronin_synthetic_genesis(2020, 55_577_501));
+        assert!(!is_ronin_synthetic_genesis(1, 55_577_500));
+    }
+
+    #[test]
+    fn canonical_genesis_retains_its_existing_records() {
+        let result = output(&migration_fixture(), GenesisKind::Canonical);
+        assert_eq!(result.block_file.transactions.len(), 10);
+        assert_eq!(result.block_file.traces.len(), 10);
+        assert_eq!(result.block_file.transactions.last().unwrap().to, Address::repeat_byte(0xee));
+        assert!(result.block_file.transactions[0].id.starts_with("0xgenesis01"));
+    }
+
+    #[test]
+    fn migration_uses_checksum_order_and_balance_before_code() {
+        // EIP-55 ASCII order puts ...a1 before ...a0, unlike raw address order.
+        let genesis: Genesis = serde_json::from_value(serde_json::json!({
+            "config": {"chainId": 2020}, "gasLimit": "0x0", "difficulty": "0x0",
+            "alloc": {
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0": {"balance":"0x1","code":"0x6000"},
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1": {"balance":"0x2","code":"0x6001"}
+            }
+        }))
+        .unwrap();
+        let file = output(&genesis, GenesisKind::RoninSynthetic).block_file;
+        assert_eq!(file.transactions.len(), 4);
+        assert_eq!(file.transactions[0].to, address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"));
+        assert_eq!(file.transactions[1].to, file.transactions[0].to);
+        assert_eq!(file.transactions[2].to, address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0"));
+        assert_eq!(file.transactions[3].to, file.transactions[2].to);
+        assert_eq!(
+            file.traces.iter().map(|trace| trace.call_create_type.as_str()).collect::<Vec<_>>(),
+            vec!["call", "create", "call", "create"]
+        );
+    }
 }

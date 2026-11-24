@@ -7,7 +7,7 @@ use alloy_consensus::{BlockHeader, constants::KECCAK_EMPTY};
 use alloy_genesis::Genesis;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{
-    Address, B256 as H256, BlockHash, BlockNumber, Bytes, U256, hex, keccak256,
+    Address, B256 as H256, BlockHash, BlockNumber, Bytes, U256, address, hex, keccak256,
 };
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use alloy_rpc_types_eth::Header;
@@ -699,6 +699,63 @@ pub fn build_debank_traces(
 pub fn build_genesis_txs_and_traces(
     genesis: &Genesis,
 ) -> (Vec<DebankTransaction>, Vec<DebankTrace>) {
+    build_alloc_txs_and_traces(genesis, GenesisRecords::Canonical)
+}
+
+/// Ronin's state-allocation upgrade follows the transaction cutoff by ten blocks.
+pub const RONIN_MIGRATION_BLOCK: u64 = 55_577_500;
+
+/// Represent the migration alloc as synthetic records, not executed EVM transactions.
+/// Original genesis records (including the native-token placeholder) are not repeated.
+pub fn build_ronin_migration_txs_and_traces(
+    genesis: &Genesis,
+) -> (Vec<DebankTransaction>, Vec<DebankTrace>) {
+    build_alloc_txs_and_traces(genesis, GenesisRecords::RoninMigration)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GenesisRecords {
+    Canonical,
+    RoninMigration,
+}
+
+impl GenesisRecords {
+    fn tx_id(self, kind: u8, addr: &Address) -> String {
+        match self {
+            Self::Canonical => format!("0xgenesis{kind:02x}{:013}{addr:?}", 0),
+            // bytes32: kind (1 byte), initialization height (11 bytes), address (20 bytes).
+            // Height zero is the repaired original-genesis layout; this namespace avoids
+            // collisions with it even when the same address occurs in both allocations.
+            Self::RoninMigration => {
+                format!("0x{kind:02x}{RONIN_MIGRATION_BLOCK:022x}{addr:x}")
+            }
+        }
+    }
+
+    fn includes(self, kind: u8, addr: &Address) -> bool {
+        if self == Self::Canonical {
+            return true;
+        }
+        // Original Ronin mainnet genesis (hash 0x6e675ee9...422a1a4) has one
+        // funded account and three code accounts. Exclude the record kind, not
+        // the entire address: e.g. a newly funded original code account is valid.
+        match kind {
+            1 => *addr != address!("ed4a9f48a62fb6fdcfb45bb00c9f61d1a436e58c"),
+            2 => ![
+                address!("0000000000000000000000000000000000000011"),
+                address!("0000000000000000000000000000000000000022"),
+                address!("0000000000000000000000000000000000000033"),
+            ]
+            .contains(addr),
+            _ => false,
+        }
+    }
+}
+
+fn build_alloc_txs_and_traces(
+    genesis: &Genesis,
+    records: GenesisRecords,
+) -> (Vec<DebankTransaction>, Vec<DebankTrace>) {
     let zero_addr = Address::ZERO;
     let mut tx_idx: u64 = 0;
     let mut txs = Vec::new();
@@ -706,16 +763,17 @@ pub fn build_genesis_txs_and_traces(
 
     // Sort addresses to ensure deterministic traversal order
     let mut sorted_addrs: Vec<&Address> = genesis.alloc.keys().collect();
-    sorted_addrs.sort_by_key(|a| a.to_string().to_lowercase());
+    sorted_addrs.sort_by_cached_key(|addr| match records {
+        GenesisRecords::Canonical => format!("{addr:?}"),
+        // Match Go common.Address.Hex() sorting in the genesis construction spec.
+        GenesisRecords::RoninMigration => addr.to_checksum(None),
+    });
 
     for addr in sorted_addrs {
         let account = &genesis.alloc[addr];
-        let addr_lower = format!("{:?}", addr).to_lowercase();
-
         // Process accounts with balance - construct transfer tx and call trace
-        if account.balance > U256::ZERO {
-            // tx id: 0xgenesis01 + 13 zeros + address(42 chars) = 67 chars
-            let tx_id = format!("0xgenesis01{:013}{}", 0, addr_lower);
+        if account.balance > U256::ZERO && records.includes(1, addr) {
+            let tx_id = records.tx_id(1, addr);
 
             let tx = DebankTransaction {
                 id: tx_id.clone(),
@@ -762,10 +820,10 @@ pub fn build_genesis_txs_and_traces(
 
         // Process accounts with code - construct create tx and create trace
         if let Some(ref code) = account.code &&
-            !code.is_empty()
+            !code.is_empty() &&
+            records.includes(2, addr)
         {
-            // tx id: 0xgenesis02 + 13 zeros + address(42 chars) = 67 chars
-            let tx_id = format!("0xgenesis02{:013}{}", 0, addr_lower);
+            let tx_id = records.tx_id(2, addr);
 
             let tx = DebankTransaction {
                 id: tx_id.clone(),
@@ -809,6 +867,10 @@ pub fn build_genesis_txs_and_traces(
             traces.push(trace);
             tx_idx += 1;
         }
+    }
+
+    if records == GenesisRecords::RoninMigration {
+        return (txs, traces);
     }
 
     // Add native token contract creation tx and trace (E address: 0xeeee...eeee)
